@@ -1,7 +1,7 @@
-pub usingnamespace @import("Compilation.zig");
-pub usingnamespace @import("Package.zig");
-pub usingnamespace @import("AstGen.zig");
-pub usingnamespace @import("Module.zig");
-pub usingnamespace @import("target.zig");
-pub usingnamespace @import("introspect.zig");
-pub usingnamespace @import("libc_installation.zig");
+pub const Compilation = @import("Compilation.zig");
+pub const Package = @import("Package.zig");
+pub const AstGen = @import("AstGen.zig");
+pub const Module = @import("Module.zig");
+pub const target = @import("target.zig");
+pub const introspect = @import("introspect.zig");
+pub const libc_installation = @import("libc_installation.zig");

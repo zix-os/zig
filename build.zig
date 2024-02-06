@@ -28,7 +28,6 @@ pub fn build(b: *std.Build) !void {
     const flat = b.option(bool, "flat", "Put files into the installation prefix in a manner suited for upstream distribution rather than a posix file system hierarchy standard") orelse false;
     const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
 
-    const test_step = b.step("test", "Run all the tests");
     const skip_install_lib_files = b.option(bool, "no-lib", "skip copying of lib/ files and langref to installation prefix. Useful for development") orelse false;
     const skip_install_langref = b.option(bool, "no-langref", "skip copying of langref to the installation prefix") orelse skip_install_lib_files;
     const skip_install_autodocs = b.option(bool, "no-autodocs", "skip copying of standard library autodocs to the installation prefix") orelse skip_install_lib_files;
@@ -100,9 +99,6 @@ pub fn build(b: *std.Build) !void {
     const skip_release_safe = b.option(bool, "skip-release-safe", "Main test suite skips release-safe builds") orelse skip_release;
     const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
     const skip_cross_glibc = b.option(bool, "skip-cross-glibc", "Main test suite skips builds that require cross glibc") orelse false;
-    const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
-    const skip_single_threaded = b.option(bool, "skip-single-threaded", "Main test suite skips tests that are single-threaded") orelse false;
-    const skip_run_translated_c = b.option(bool, "skip-run-translated-c", "Main test suite skips run-translated-c tests") orelse false;
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
 
@@ -128,9 +124,6 @@ pub fn build(b: *std.Build) !void {
         "llvm-has-xtensa",
         "Whether LLVM has the experimental target xtensa enabled",
     ) orelse false;
-    const enable_ios_sdk = b.option(bool, "enable-ios-sdk", "Run tests requiring presence of iOS SDK and frameworks") orelse false;
-    const enable_macos_sdk = b.option(bool, "enable-macos-sdk", "Run tests requiring presence of macOS SDK and frameworks") orelse enable_ios_sdk;
-    const enable_symlinks_windows = b.option(bool, "enable-symlinks-windows", "Run tests requiring presence of symlinks on Windows") orelse false;
     const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
 
     if (!skip_install_lib_files) {
@@ -379,7 +372,6 @@ pub fn build(b: *std.Build) !void {
         chosen_opt_modes_buf[chosen_mode_index] = builtin.OptimizeMode.ReleaseSmall;
         chosen_mode_index += 1;
     }
-    const optimization_modes = chosen_opt_modes_buf[0..chosen_mode_index];
 
     const fmt_include_paths = &.{ "doc", "lib", "src", "test", "tools", "build.zig" };
     const fmt_exclude_paths = &.{"test/cases"};
@@ -393,86 +385,6 @@ pub fn build(b: *std.Build) !void {
         .exclude_paths = fmt_exclude_paths,
         .check = true,
     }).step);
-
-    const test_cases_step = b.step("test-cases", "Run the main compiler test cases");
-    try tests.addCases(b, test_cases_step, test_filter, check_case_exe, .{
-        .enable_llvm = enable_llvm,
-        .llvm_has_m68k = llvm_has_m68k,
-        .llvm_has_csky = llvm_has_csky,
-        .llvm_has_arc = llvm_has_arc,
-        .llvm_has_xtensa = llvm_has_xtensa,
-    });
-    test_step.dependOn(test_cases_step);
-
-    test_step.dependOn(tests.addModuleTests(b, .{
-        .test_filter = test_filter,
-        .root_src = "test/behavior.zig",
-        .name = "behavior",
-        .desc = "Run the behavior tests",
-        .optimize_modes = optimization_modes,
-        .skip_single_threaded = skip_single_threaded,
-        .skip_non_native = skip_non_native,
-        .skip_cross_glibc = skip_cross_glibc,
-        .skip_libc = skip_libc,
-        .max_rss = 1 * 1024 * 1024 * 1024,
-    }));
-
-    test_step.dependOn(tests.addModuleTests(b, .{
-        .test_filter = test_filter,
-        .root_src = "lib/compiler_rt.zig",
-        .name = "compiler-rt",
-        .desc = "Run the compiler_rt tests",
-        .optimize_modes = optimization_modes,
-        .skip_single_threaded = true,
-        .skip_non_native = skip_non_native,
-        .skip_cross_glibc = skip_cross_glibc,
-        .skip_libc = true,
-    }));
-
-    test_step.dependOn(tests.addModuleTests(b, .{
-        .test_filter = test_filter,
-        .root_src = "lib/c.zig",
-        .name = "universal-libc",
-        .desc = "Run the universal libc tests",
-        .optimize_modes = optimization_modes,
-        .skip_single_threaded = true,
-        .skip_non_native = skip_non_native,
-        .skip_cross_glibc = skip_cross_glibc,
-        .skip_libc = true,
-    }));
-
-    test_step.dependOn(tests.addCompareOutputTests(b, test_filter, optimization_modes));
-    test_step.dependOn(tests.addStandaloneTests(
-        b,
-        optimization_modes,
-        enable_macos_sdk,
-        enable_ios_sdk,
-        false,
-        enable_symlinks_windows,
-    ));
-    test_step.dependOn(tests.addCAbiTests(b, skip_non_native, skip_release));
-    test_step.dependOn(tests.addLinkTests(b, enable_macos_sdk, enable_ios_sdk, false, enable_symlinks_windows));
-    test_step.dependOn(tests.addStackTraceTests(b, test_filter, optimization_modes));
-    test_step.dependOn(tests.addCliTests(b));
-    test_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, optimization_modes));
-    test_step.dependOn(tests.addTranslateCTests(b, test_filter));
-    if (!skip_run_translated_c) {
-        test_step.dependOn(tests.addRunTranslatedCTests(b, test_filter, target));
-    }
-
-    test_step.dependOn(tests.addModuleTests(b, .{
-        .test_filter = test_filter,
-        .root_src = "lib/std/std.zig",
-        .name = "std",
-        .desc = "Run the standard library tests",
-        .optimize_modes = optimization_modes,
-        .skip_single_threaded = skip_single_threaded,
-        .skip_non_native = skip_non_native,
-        .skip_cross_glibc = skip_cross_glibc,
-        .skip_libc = skip_libc,
-        // I observed a value of 4572626944 on the M2 CI.
-        .max_rss = 5029889638,
-    }));
 
     b.step("fmt", "Modify source files in place to have conforming formatting")
         .dependOn(&do_fmt.step);

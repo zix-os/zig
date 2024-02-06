@@ -27,13 +27,11 @@ pub fn build(b: *std.Build) !void {
 
     const flat = b.option(bool, "flat", "Put files into the installation prefix in a manner suited for upstream distribution rather than a posix file system hierarchy standard") orelse false;
     const single_threaded = b.option(bool, "single-threaded", "Build artifacts that run in single threaded mode");
-    const use_zig_libcxx = b.option(bool, "use-zig-libcxx", "If libc++ is needed, use zig's bundled version, don't try to integrate with the system") orelse false;
 
     const test_step = b.step("test", "Run all the tests");
     const skip_install_lib_files = b.option(bool, "no-lib", "skip copying of lib/ files and langref to installation prefix. Useful for development") orelse false;
     const skip_install_langref = b.option(bool, "no-langref", "skip copying of langref to the installation prefix") orelse skip_install_lib_files;
     const skip_install_autodocs = b.option(bool, "no-autodocs", "skip copying of standard library autodocs to the installation prefix") orelse skip_install_lib_files;
-    const no_bin = b.option(bool, "no-bin", "skip emitting compiler binary") orelse false;
     const only_reduce = b.option(bool, "only-reduce", "only build zig reduce") orelse false;
 
     const docgen_exe = b.addExecutable(.{
@@ -179,7 +177,6 @@ pub fn build(b: *std.Build) !void {
     if (only_install_lib_files)
         return;
 
-    const entitlements = b.option([]const u8, "entitlements", "Path to entitlements file for hot-code swapping without sudo on macOS");
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
     const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse (tracy != null);
     const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse (tracy != null);
@@ -187,7 +184,6 @@ pub fn build(b: *std.Build) !void {
     const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse (enable_llvm or only_c);
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable thread-sanitization") orelse false;
     const strip = b.option(bool, "strip", "Omit debug information");
-    const pie = b.option(bool, "pie", "Produce a Position Independent Executable");
     const value_tracing = b.option(bool, "value-tracing", "Enable extra state tracking to help troubleshoot bugs in the compiler (using the std.debug.Trace API)") orelse false;
 
     const mem_leak_frames: u32 = b.option(u32, "mem-leak-frames", "How many stack frames to print when a memory leak occurs. Tests get 2x this amount.") orelse blk: {
@@ -196,45 +192,18 @@ pub fn build(b: *std.Build) !void {
         break :blk 4;
     };
 
-    const exe = addCompilerStep(b, .{
-        .optimize = optimize,
+    const zig_module = b.addModule("zig", .{
+        .root_source_file = .{ .path = "src/compiler.zig" },
         .target = target,
+        .optimize = optimize,
         .strip = strip,
         .sanitize_thread = sanitize_thread,
         .single_threaded = single_threaded,
+        .link_libc = link_libc,
     });
-    exe.pie = pie;
-    exe.entitlements = entitlements;
-
-    exe.build_id = b.option(
-        std.zig.BuildId,
-        "build-id",
-        "Request creation of '.note.gnu.build-id' section",
-    );
-
-    if (no_bin) {
-        b.getInstallStep().dependOn(&exe.step);
-    } else {
-        const install_exe = b.addInstallArtifact(exe, .{
-            .dest_dir = if (flat) .{ .override = .prefix } else .default,
-        });
-        b.getInstallStep().dependOn(&install_exe.step);
-    }
-
-    test_step.dependOn(&exe.step);
-
-    if (target.result.os.tag == .windows and target.result.abi == .gnu) {
-        // LTO is currently broken on mingw, this can be removed when it's fixed.
-        exe.want_lto = false;
-        check_case_exe.want_lto = false;
-    }
-
-    const use_llvm = b.option(bool, "use-llvm", "Use the llvm backend");
-    exe.use_llvm = use_llvm;
-    exe.use_lld = use_llvm;
 
     const exe_options = b.addOptions();
-    exe.root_module.addOptions("build_options", exe_options);
+    zig_module.addOptions("build_options", exe_options);
 
     exe_options.addOption(u32, "mem_leak_frames", mem_leak_frames);
     exe_options.addOption(bool, "skip_non_native", skip_non_native);
@@ -249,7 +218,6 @@ pub fn build(b: *std.Build) !void {
     exe_options.addOption(bool, "only_reduce", only_reduce);
 
     if (link_libc) {
-        exe.linkLibC();
         check_case_exe.linkLibC();
     }
 
@@ -341,16 +309,10 @@ pub fn build(b: *std.Build) !void {
                     b.addSearchPrefix(path);
                 }
             }
-
-            try addCmakeCfgOptionsToExe(b, cfg, exe, use_zig_libcxx);
-            try addCmakeCfgOptionsToExe(b, cfg, check_case_exe, use_zig_libcxx);
-        } else {
-            // Here we are -Denable-llvm but no cmake integration.
-            try addStaticLlvmOptionsToExe(exe);
-            try addStaticLlvmOptionsToExe(check_case_exe);
         }
+
         if (target.result.os.tag == .windows) {
-            inline for (.{ exe, check_case_exe }) |artifact| {
+            inline for (.{check_case_exe}) |artifact| {
                 artifact.linkSystemLibrary("version");
                 artifact.linkSystemLibrary("uuid");
                 artifact.linkSystemLibrary("ole32");
@@ -367,29 +329,6 @@ pub fn build(b: *std.Build) !void {
     exe_options.addOption(bool, "enable_tracy_callstack", tracy_callstack);
     exe_options.addOption(bool, "enable_tracy_allocation", tracy_allocation);
     exe_options.addOption(bool, "value_tracing", value_tracing);
-    if (tracy) |tracy_path| {
-        const client_cpp = b.pathJoin(
-            &[_][]const u8{ tracy_path, "public", "TracyClient.cpp" },
-        );
-
-        // On mingw, we need to opt into windows 7+ to get some features required by tracy.
-        const tracy_c_flags: []const []const u8 = if (target.result.os.tag == .windows and target.result.abi == .gnu)
-            &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined", "-D_WIN32_WINNT=0x601" }
-        else
-            &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" };
-
-        exe.addIncludePath(.{ .cwd_relative = tracy_path });
-        exe.addCSourceFile(.{ .file = .{ .cwd_relative = client_cpp }, .flags = tracy_c_flags });
-        if (!enable_llvm) {
-            exe.root_module.linkSystemLibrary("c++", .{ .use_pkg_config = .no });
-        }
-        exe.linkLibC();
-
-        if (target.result.os.tag == .windows) {
-            exe.linkSystemLibrary("dbghelp");
-            exe.linkSystemLibrary("ws2_32");
-        }
-    }
 
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
 
@@ -535,8 +474,6 @@ pub fn build(b: *std.Build) !void {
         .max_rss = 5029889638,
     }));
 
-    try addWasiUpdateStep(b, version);
-
     b.step("fmt", "Modify source files in place to have conforming formatting")
         .dependOn(&do_fmt.step);
 
@@ -559,56 +496,6 @@ pub fn build(b: *std.Build) !void {
     update_mingw_step.dependOn(&update_mingw_run.step);
 }
 
-fn addWasiUpdateStep(b: *std.Build, version: [:0]const u8) !void {
-    const semver = try std.SemanticVersion.parse(version);
-
-    var target_query: std.zig.CrossTarget = .{
-        .cpu_arch = .wasm32,
-        .os_tag = .wasi,
-    };
-    target_query.cpu_features_add.addFeature(@intFromEnum(std.Target.wasm.Feature.bulk_memory));
-
-    const exe = addCompilerStep(b, .{
-        .optimize = .ReleaseSmall,
-        .target = b.resolveTargetQuery(target_query),
-    });
-
-    const exe_options = b.addOptions();
-    exe.root_module.addOptions("build_options", exe_options);
-
-    exe_options.addOption(u32, "mem_leak_frames", 0);
-    exe_options.addOption(bool, "have_llvm", false);
-    exe_options.addOption(bool, "force_gpa", false);
-    exe_options.addOption(bool, "only_c", true);
-    exe_options.addOption([:0]const u8, "version", version);
-    exe_options.addOption(std.SemanticVersion, "semver", semver);
-    exe_options.addOption(bool, "enable_logging", false);
-    exe_options.addOption(bool, "enable_link_snapshots", false);
-    exe_options.addOption(bool, "enable_tracy", false);
-    exe_options.addOption(bool, "enable_tracy_callstack", false);
-    exe_options.addOption(bool, "enable_tracy_allocation", false);
-    exe_options.addOption(bool, "value_tracing", false);
-    exe_options.addOption(bool, "only_core_functionality", true);
-    exe_options.addOption(bool, "only_reduce", false);
-
-    const run_opt = b.addSystemCommand(&.{
-        "wasm-opt",
-        "-Oz",
-        "--enable-bulk-memory",
-        "--enable-sign-ext",
-    });
-    run_opt.addArtifactArg(exe);
-    run_opt.addArg("-o");
-    run_opt.addFileArg(.{ .path = "stage1/zig1.wasm" });
-
-    const copy_zig_h = b.addWriteFiles();
-    copy_zig_h.addCopyFileToSource(.{ .path = "lib/zig.h" }, "stage1/zig.h");
-
-    const update_zig1_step = b.step("update-zig1", "Update stage1/zig1.wasm");
-    update_zig1_step.dependOn(&run_opt.step);
-    update_zig1_step.dependOn(&copy_zig_h.step);
-}
-
 const AddCompilerStepOptions = struct {
     optimize: std.builtin.OptimizeMode,
     target: std.Build.ResolvedTarget,
@@ -616,50 +503,6 @@ const AddCompilerStepOptions = struct {
     sanitize_thread: ?bool = null,
     single_threaded: ?bool = null,
 };
-
-fn addCompilerStep(b: *std.Build, options: AddCompilerStepOptions) *std.Build.Step.Compile {
-    const exe = b.addExecutable(.{
-        .name = "zig",
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = options.target,
-        .optimize = options.optimize,
-        .max_rss = 7_000_000_000,
-        .strip = options.strip,
-        .sanitize_thread = options.sanitize_thread,
-        .single_threaded = options.single_threaded,
-    });
-    exe.stack_size = stack_size;
-
-    const aro_options = b.addOptions();
-    aro_options.addOption([]const u8, "version_str", "aro-zig");
-    const aro_options_module = aro_options.createModule();
-    const aro_backend = b.createModule(.{
-        .root_source_file = .{ .path = "deps/aro/backend.zig" },
-        .imports = &.{.{
-            .name = "build_options",
-            .module = aro_options_module,
-        }},
-    });
-    const aro_module = b.createModule(.{
-        .root_source_file = .{ .path = "deps/aro/aro.zig" },
-        .imports = &.{
-            .{
-                .name = "build_options",
-                .module = aro_options_module,
-            },
-            .{
-                .name = "backend",
-                .module = aro_backend,
-            },
-            GenerateDef.create(b, .{ .name = "Builtins/Builtin.def", .src_prefix = "deps/aro/aro" }),
-            GenerateDef.create(b, .{ .name = "Attribute/names.def", .src_prefix = "deps/aro/aro" }),
-            GenerateDef.create(b, .{ .name = "Diagnostics/messages.def", .src_prefix = "deps/aro/aro", .kind = .named }),
-        },
-    });
-
-    exe.root_module.addImport("aro", aro_module);
-    return exe;
-}
 
 const exe_cflags = [_][]const u8{
     "-std=c++17",
